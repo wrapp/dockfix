@@ -32,9 +32,15 @@ func NewClient() (*docker.Client, error) {
 	return docker.NewClient(dockerURL)
 }
 
+// Container is a wrapper around a docker.Container
+type Container struct {
+	*docker.Container
+	name string
+}
+
 // PortURL returns a URL to the first specified port matching portSpec
 // It also substitutes the host flow DOCKER_HOST if applicable
-func PortURL(cont *docker.Container, portSpec docker.Port) (*url.URL, error) {
+func PortURL(cont Container, portSpec docker.Port) (*url.URL, error) {
 	port := cont.NetworkSettings.Ports[portSpec][0]
 	var host string
 	envHost := os.Getenv("DOCKER_HOST")
@@ -55,10 +61,11 @@ func PortURL(cont *docker.Container, portSpec docker.Port) (*url.URL, error) {
 
 // StartContainer starts a container with the specified base image, creating one
 // if necessary. The container id is stored in a file named <name>.container.
-func StartContainer(name, baseImage string) (*docker.Container, error) {
+func StartContainer(name, baseImage string) (Container, error) {
+	c := Container{name: name}
 	dc, err := NewClient()
 	if err != nil {
-		return nil, err
+		return c, err
 	}
 
 	containerFileName := name + ".container"
@@ -68,16 +75,9 @@ func StartContainer(name, baseImage string) (*docker.Container, error) {
 		log.Print("Using existing container: ", string(cid))
 		containerID = string(cid)
 	} else {
-		log.Print("Creating new container for ", baseImage)
-		cont, err := dc.CreateContainer(
-			docker.CreateContainerOptions{
-				Config: &docker.Config{
-					Image: baseImage,
-				},
-			},
-		)
+		cont, err := createContainer(baseImage)
 		if err != nil {
-			return nil, err
+			return c, err
 		}
 		log.Print("Created container: ", string(cont.ID))
 		containerID = cont.ID
@@ -89,12 +89,77 @@ func StartContainer(name, baseImage string) (*docker.Container, error) {
 	// Error intentionally ignored, it is ok if the container is already running,
 	// and if we run into other problems, InspectContainer will report it
 	dc.StartContainer(containerID, &hc)
-	return dc.InspectContainer(containerID)
+	cont, err := dc.InspectContainer(containerID)
+	if err != nil {
+		return c, err
+	}
+
+	c.Container = cont
+
+	return c, nil
 }
 
-func StopContainer(c *docker.Container) {
+func createContainer(baseImage string) (*docker.Container, error) {
+	dc, _ := NewClient()
+
+	exists, err := imageExists(baseImage)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		log.Printf("%s image does not exist. Pulling image now!", baseImage)
+		err = dc.PullImage(docker.PullImageOptions{Repository: baseImage}, docker.AuthConfiguration{})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	log.Print("Creating new container for ", baseImage)
+	return dc.CreateContainer(
+		docker.CreateContainerOptions{
+			Config: &docker.Config{
+				Image: baseImage,
+			},
+		},
+	)
+}
+
+// StopContainer stops the running container.
+func StopContainer(c Container) {
 	dc, _ := NewClient()
 	dc.KillContainer(docker.KillContainerOptions{
 		ID: c.ID,
 	})
+}
+
+// RemoveContainer removes the container and its id file.
+func RemoveContainer(c Container) error {
+	dc, _ := NewClient()
+	err := dc.RemoveContainer(docker.RemoveContainerOptions{
+		ID: c.ID,
+	})
+	if err != nil {
+		return err
+	}
+
+	containerFileName := c.name + ".container"
+	return os.Remove(containerFileName)
+}
+
+func imageExists(baseImage string) (bool, error) {
+	dc, _ := NewClient()
+	imageName := strings.Split(baseImage, ":")[0]
+	images, err := dc.ListImages(docker.ListImagesOptions{Filter: imageName})
+	if err != nil {
+		return false, err
+	}
+
+	for _, image := range images {
+		for _, tag := range image.RepoTags {
+			if tag == baseImage {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

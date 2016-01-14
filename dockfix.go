@@ -75,14 +75,7 @@ func StartContainer(name, baseImage string) (Container, error) {
 		log.Print("Using existing container: ", string(cid))
 		containerID = string(cid)
 	} else {
-		log.Print("Creating new container for ", baseImage)
-		cont, err := dc.CreateContainer(
-			docker.CreateContainerOptions{
-				Config: &docker.Config{
-					Image: baseImage,
-				},
-			},
-		)
+		cont, err := createContainer(baseImage)
 		if err != nil {
 			return c, err
 		}
@@ -106,6 +99,31 @@ func StartContainer(name, baseImage string) (Container, error) {
 	return c, nil
 }
 
+func createContainer(baseImage string) (*docker.Container, error) {
+	dc, _ := NewClient()
+
+	exists, err := imageExists(baseImage)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		log.Printf("%s image does not exist. Pulling image now!", baseImage)
+		err = dc.PullImage(docker.PullImageOptions{Repository: baseImage}, docker.AuthConfiguration{})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	log.Print("Creating new container for ", baseImage)
+	return dc.CreateContainer(
+		docker.CreateContainerOptions{
+			Config: &docker.Config{
+				Image: baseImage,
+			},
+		},
+	)
+}
+
 // StopContainer stops the running container.
 func StopContainer(c Container) {
 	dc, _ := NewClient()
@@ -126,4 +144,22 @@ func RemoveContainer(c Container) error {
 
 	containerFileName := c.name + ".container"
 	return os.Remove(containerFileName)
+}
+
+func imageExists(baseImage string) (bool, error) {
+	dc, _ := NewClient()
+	imageName := strings.Split(baseImage, ":")[0]
+	images, err := dc.ListImages(docker.ListImagesOptions{Filter: imageName})
+	if err != nil {
+		return false, err
+	}
+
+	for _, image := range images {
+		for _, tag := range image.RepoTags {
+			if tag == baseImage {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
